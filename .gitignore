@@ -50,3 +50,4 @@ break_reminder_windows.py
 dist/
 build/
 *.egg-info/
+BreakReminder.app/
