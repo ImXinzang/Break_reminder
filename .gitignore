@@ -36,6 +36,9 @@ Icon
 # Windows 版本（不上传）
 break_reminder_windows.py
 
+# 工作区配置（不上传）
+.workbuddy/
+
 # 编辑器目录
 .vscode/
 .idea/
