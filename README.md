@@ -281,9 +281,6 @@ python break_reminder_windows.py --interval 30
 Break_reminder/
 ├── break_reminder.py              # macOS 主脚本
 ├── break_reminder_windows.py      # Windows 主脚本
-├── build_windows.py               # Windows 打包脚本
-├── requirements_windows.txt       # Windows 依赖列表
-├── .gitignore                     # Git 忽略配置
 └── README.md                      # 本文档
 
 macOS 自动生成的文件：
