@@ -45,7 +45,8 @@ I18N = {
         "rest_msg_suffix": "\n请起身活动，喝杯水放松一下！",
         "lock_rest": "锁屏休息",
         "continue_work": "继续工作",
-        "offwork_title": "🐮牛马~你已经下班啦！",
+        "offwork_title": "🐮牛马~下班时间到,请享受你的生活！",
+        "offwork_title_friday": "牛马~下班时间到!🐮\n明天是周末哦!🎉\n现在赶紧滚回去享受你的周末生活!🎉",
         "offwork_msg_prefix": "今日使用电脑时长",
         "offwork_got_it": "知道了",
         "offwork_dialog_title": "下班提醒",
@@ -73,7 +74,8 @@ I18N = {
         "rest_msg_suffix": "\nTake a break, drink some water and relax!",
         "lock_rest": "Lock & Rest",
         "continue_work": "Keep Working",
-        "offwork_title": "🐮Drudge,Off Work now!",
+        "offwork_title": "🐮Drudge,Off Work now!Enjoying your life!",
+        "offwork_title_friday": "Drudge, Off work!🐮\nTomorrow is the weekend🎉\nGo home and enjoy it!🎉",
         "offwork_msg_prefix": "Screen time today",
         "offwork_got_it": "Got It",
         "offwork_dialog_title": "Off Work Reminder",
@@ -228,19 +230,34 @@ def load_config():
             return DEFAULT_CONFIG
     return DEFAULT_CONFIG
 
+def _is_break_reminder_process(pid):
+    """检查给定 PID 是否确实是 break_reminder 进程（防止 PID 被系统进程复用）。"""
+    try:
+        result = subprocess.run(
+            ['ps', '-p', str(pid), '-o', 'args=', '-c'],
+            capture_output=True, text=True, timeout=3
+        )
+        args = result.stdout.strip()
+        return 'break_reminder' in args
+    except Exception:
+        return False
+
 def ensure_single_instance():
     """确保只有一个实例在运行。"""
     if os.path.exists(PID_FILE):
         try:
             with open(PID_FILE, 'r') as f:
                 old_pid = int(f.read().strip())
-            os.kill(old_pid, 0)
-            sys.exit(0)
+            # 仅当该 PID 确实是 break_reminder 进程时才视为已运行
+            if _is_break_reminder_process(old_pid):
+                sys.exit(0)
         except (OSError, ValueError, ProcessLookupError):
-            try:
-                os.remove(PID_FILE)
-            except OSError:
-                pass
+            pass
+        # PID 无效或已被其他进程占用 → 清除残留文件
+        try:
+            os.remove(PID_FILE)
+        except OSError:
+            pass
     with open(PID_FILE, 'w') as f:
         f.write(str(os.getpid()))
 
@@ -446,17 +463,21 @@ class ReminderDialog(QDialog):
 class OffWorkDialog(QDialog):
     """下班提醒弹窗，显示今日使用电脑时长。和休息弹窗相同配色。"""
 
-    def __init__(self, work_time_str):
+    def __init__(self, work_time_str, title=None, wrap=False):
         super().__init__()
+        if title is None:
+            title = t("offwork_title")
         self.setWindowTitle(t("offwork_dialog_title"))
         self.setModal(True)
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Dialog)
-        self.setFixedSize(420, 260)
+        # 换行时加高窗口以容纳两行标题
+        dialog_h = 320 if wrap else 280
+        self.setFixedSize(560, dialog_h)
         center_widget(self)
 
         # 与主窗口一致的浅绿色渐变背景
         palette = self.palette()
-        gradient = QLinearGradient(0, 0, 420, 260)
+        gradient = QLinearGradient(0, 0, 560, dialog_h)
         gradient.setColorAt(0, QColor(232, 245, 233))
         gradient.setColorAt(0.5, QColor(220, 237, 200))
         gradient.setColorAt(1, QColor(200, 230, 201))
@@ -466,10 +487,12 @@ class OffWorkDialog(QDialog):
         layout = QVBoxLayout()
         layout.setContentsMargins(40, 30, 40, 30)
 
-        title_label = QLabel(t("offwork_title"))
-        title_label.setFont(QFont('PingFang SC', 28, QFont.Bold))
+        title_label = QLabel(title)
+        title_label.setFont(QFont('PingFang SC', 24, QFont.Bold))
         title_label.setStyleSheet('color: #1B5E20;')
         title_label.setAlignment(Qt.AlignCenter)
+        if wrap:
+            title_label.setWordWrap(True)
 
         # 前缀标签
         prefix_label = QLabel(t("offwork_msg_prefix").rstrip('\n'))
@@ -990,7 +1013,12 @@ class MainWindow(QWidget):
     def _show_off_work_dialog(self):
         """在主线程执行下班弹窗"""
         work_time_str = format_duration_chinese(self._daily_work_seconds)
-        dialog = OffWorkDialog(work_time_str)
+        # 周五使用特殊标题（可换行显示）
+        now_dt = datetime.now()
+        if now_dt.weekday() == 4:  # 4 = 周五
+            dialog = OffWorkDialog(work_time_str, title=t("offwork_title_friday"), wrap=True)
+        else:
+            dialog = OffWorkDialog(work_time_str)
         dialog.exec_()
     
     def update_display(self):
