@@ -31,8 +31,6 @@ A cross-platform desktop break reminder app that helps you take regular breaks. 
 Break_reminder/
 ├── break_reminder_macos.py      # macOS 版本
 ├── break_reminder_windows.py    # Windows 版本
-├── BreakReminder.spec           # PyInstaller 打包配置 (macOS)
-├── BreakReminder_windows.spec   # PyInstaller 打包配置 (Windows)
 ├── LICENSE                      # MIT 许可证
 └── README.md
 ```
@@ -83,17 +81,19 @@ python break_reminder_macos.py --interval 30
 
 ### 打包为可执行文件 / Build Executable
 
-使用 PyInstaller 打包：
+使用 PyInstaller 打包（仓库未附带 `.spec` 配置，直接用命令行参数打包即可）：
 
 ```bash
+pip install pyinstaller
+
 # macOS
-pyinstaller BreakReminder.spec
+pyinstaller --onefile --windowed --name BreakReminder break_reminder_macos.py
 
 # Windows
-pyinstaller BreakReminder_windows.spec
+pyinstaller --onefile --windowed --name BreakReminder break_reminder_windows.py
 ```
 
-打包产物在 `dist/` 目录下。
+打包产物在 `dist/` 目录下。如需自定义图标或隐藏控制台，可自行添加 `--icon` 等参数。
 
 ## 配置说明 / Configuration
 
