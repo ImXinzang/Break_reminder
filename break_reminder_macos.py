@@ -7,17 +7,19 @@ import json
 import threading
 import argparse
 import math
+import random
 import re
 from datetime import datetime
-from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout, 
-                             QHBoxLayout, QPushButton, QSystemTrayIcon, 
+from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
+                             QHBoxLayout, QPushButton, QSystemTrayIcon,
                              QMenu, QAction, QDialog, QSpinBox, QLineEdit,
-                             QMessageBox, QAbstractSpinBox)
-from PyQt5.QtGui import QIcon, QFont, QPalette, QBrush, QPixmap, QColor, QLinearGradient, QPainter, QPen, QRegExpValidator
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QTime, QRegExp
+                             QMessageBox)
+from PyQt5.QtGui import QIcon, QFont, QPalette, QBrush, QPixmap, QColor, QLinearGradient, QRadialGradient, QPainter, QPen
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 
 CONFIG_FILE = os.path.expanduser("~/.break_reminder_config.json")
 PID_FILE = os.path.expanduser("~/.break_reminder.pid")
+WORK_CYCLE_SECONDS = 8 * 3600  # 托盘指针满圈 = 今日累计工作 8 小时
 LAUNCH_AGENT_ID = "com.user.breakreminder"
 LAUNCH_AGENT_PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LAUNCH_AGENT_ID}.plist")
 
@@ -109,7 +111,7 @@ def get_current_lang():
 # 解锁: "closing and releasing _screenLockWindowController"
 
 DEBUG_LOCK = False  # 设为 True 可开启锁屏检测调试日志
-DEBUG_TIMER = True   # 设为 True 可开启计时器调试日志（用于排查弹框问题）
+DEBUG_TIMER = False  # 设为 True 可开启计时器调试日志（用于排查弹框问题）
 
 
 def debug_lock(msg):
@@ -315,11 +317,24 @@ def format_duration_chinese(seconds):
         return f"{minutes}{t('mins')}"
 
 def center_widget(widget):
-    geo = QApplication.desktop().screenGeometry()
+    screen = QApplication.primaryScreen()
+    if screen is None:
+        return
+    geo = screen.availableGeometry()
     widget.move(
         (geo.width() - widget.width()) // 2,
         (geo.height() - widget.height()) // 2
     )
+
+def apply_green_gradient(widget, width, height):
+    """为窗口/弹窗应用统一的浅绿色渐变背景（主窗与两个弹窗共用）。"""
+    palette = widget.palette()
+    gradient = QLinearGradient(0, 0, width, height)
+    gradient.setColorAt(0, QColor(232, 245, 233))
+    gradient.setColorAt(0.5, QColor(220, 237, 200))
+    gradient.setColorAt(1, QColor(200, 230, 201))
+    palette.setBrush(QPalette.Background, QBrush(gradient))
+    widget.setPalette(palette)
 
 # ========= 开机自启 LaunchAgent 管理 =========
 
@@ -376,13 +391,7 @@ class ReminderDialog(QDialog):
         center_widget(self)
 
         # 与主窗口一致的浅绿色渐变背景
-        palette = self.palette()
-        gradient = QLinearGradient(0, 0, 420, 240)
-        gradient.setColorAt(0, QColor(232, 245, 233))
-        gradient.setColorAt(0.5, QColor(220, 237, 200))
-        gradient.setColorAt(1, QColor(200, 230, 201))
-        palette.setBrush(QPalette.Background, QBrush(gradient))
-        self.setPalette(palette)
+        apply_green_gradient(self, 420, 240)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(40, 30, 40, 30)
@@ -460,6 +469,89 @@ class ReminderDialog(QDialog):
 
 # ========= OffWorkDialog =========
 
+class FireworksOverlay(QWidget):
+    """下班弹框的烟花动画层：覆盖弹框、鼠标穿透不挡按钮，弹出时播放多轮爆发后自动停止。"""
+
+    # 烟花配色（橙 / 蓝 / 黄 / 紫 / 绿 / 红）
+    PALETTE = [
+        QColor(255, 87, 34), QColor(33, 150, 243), QColor(255, 193, 7),
+        QColor(156, 39, 176), QColor(76, 175, 80), QColor(244, 67, 54),
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        if parent is not None:
+            self.setGeometry(0, 0, parent.width(), parent.height())
+        self.particles = []
+        self.bursts = []   # (触发帧, x, y, 颜色)
+        self.frame = 0
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._tick)
+        self._schedule_bursts()
+        self.timer.start(33)  # ≈30fps
+
+    def _schedule_bursts(self):
+        """在上半区随机位置安排 5 轮爆发，错峰触发。"""
+        w = self.width() or 560
+        h = self.height() or 280
+        for i in range(5):
+            x = random.randint(int(w * 0.2), int(w * 0.8))
+            y = random.randint(int(h * 0.15), int(h * 0.5))
+            self.bursts.append((i * 14 + random.randint(0, 6), x, y, random.choice(self.PALETTE)))
+
+    def _burst(self, x, y, color):
+        """在 (x,y) 生成一个粒子球。"""
+        for _ in range(28):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(1.5, 4.5)
+            self.particles.append({
+                'x': x, 'y': y,
+                'vx': math.cos(angle) * speed,
+                'vy': math.sin(angle) * speed,
+                'life': 1.0,
+                'decay': random.uniform(0.012, 0.025),
+                'color': color,
+                'size': random.uniform(2.0, 3.5),
+            })
+
+    def _tick(self):
+        self.frame += 1
+        # 到点触发爆发的那一轮
+        for b in list(self.bursts):
+            if self.frame >= b[0]:
+                self._burst(b[1], b[2], b[3])
+                self.bursts.remove(b)
+        # 物理推进：重力下落 + 生命衰减
+        gravity = 0.08
+        for p in self.particles:
+            p['x'] += p['vx']
+            p['y'] += p['vy']
+            p['vy'] += gravity
+            p['life'] -= p['decay']
+        self.particles = [p for p in self.particles if p['life'] > 0]
+        self.update()
+        # 粒子与待爆发都清空后停止定时器，避免常驻空转
+        if not self.particles and not self.bursts:
+            self.timer.stop()
+
+    def paintEvent(self, event):
+        if not self.particles:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        for p in self.particles:
+            alpha = int(255 * max(0.0, p['life']))
+            c = QColor(p['color'])
+            c.setAlpha(alpha)
+            painter.setBrush(QBrush(c))
+            r = p['size']
+            painter.drawEllipse(int(p['x'] - r), int(p['y'] - r), int(r * 2), int(r * 2))
+        painter.end()
+
+
 class OffWorkDialog(QDialog):
     """下班提醒弹窗，显示今日使用电脑时长。和休息弹窗相同配色。"""
 
@@ -476,13 +568,7 @@ class OffWorkDialog(QDialog):
         center_widget(self)
 
         # 与主窗口一致的浅绿色渐变背景
-        palette = self.palette()
-        gradient = QLinearGradient(0, 0, 560, dialog_h)
-        gradient.setColorAt(0, QColor(232, 245, 233))
-        gradient.setColorAt(0.5, QColor(220, 237, 200))
-        gradient.setColorAt(1, QColor(200, 230, 201))
-        palette.setBrush(QPalette.Background, QBrush(gradient))
-        self.setPalette(palette)
+        apply_green_gradient(self, 560, dialog_h)
 
         layout = QVBoxLayout()
         layout.setContentsMargins(40, 30, 40, 30)
@@ -538,6 +624,9 @@ class OffWorkDialog(QDialog):
 
         self.setLayout(layout)
 
+        # 烟花动画层：覆盖整个弹框、鼠标穿透不挡 OK 按钮，弹出时自动播放
+        self.fireworks = FireworksOverlay(self)
+
 # ========= MainWindow =========
 
 class MainWindow(QWidget):
@@ -551,7 +640,6 @@ class MainWindow(QWidget):
         super().__init__()
         self.config = load_config()
         self.running = True
-        self.current_state = "working"
         self.state_start_time = time.time()
         self.total_start_time = time.time()
         self._screen_locked = False
@@ -562,6 +650,8 @@ class MainWindow(QWidget):
         self._last_tick_time = time.time()
         self._current_date = datetime.now().date()
         self._off_work_notified = False
+        self._off_work_pending = False  # 锁屏跨过下班时间时，解锁后补弹
+        self._last_tray_state = None    # 托盘图标颜色缓存（pct 或 'paused'）
         
         # 用户决策同步
         self._rest_decision_event = threading.Event()
@@ -603,13 +693,7 @@ class MainWindow(QWidget):
         self.hide()
     
     def set_background(self):
-        palette = QPalette()
-        gradient = QLinearGradient(0, 0, 460, 320)
-        gradient.setColorAt(0, QColor(232, 245, 233))
-        gradient.setColorAt(0.5, QColor(220, 237, 200))
-        gradient.setColorAt(1, QColor(200, 230, 201))
-        palette.setBrush(QPalette.Background, QBrush(gradient))
-        self.setPalette(palette)
+        apply_green_gradient(self, 460, 320)
         self.setStyleSheet('''
             QLabel {
                 color: #333333;
@@ -822,18 +906,55 @@ class MainWindow(QWidget):
             self.offwork_time_edit.setText(old_val.replace(":", " : "))
             debug_timer(f"下班时间格式错误，恢复为: {old_val}")
     
-    def create_clock_icon(self):
+    def create_clock_icon(self, ratio=None, paused=False, work_ratio=None):
+        """生成托盘图标。
+
+        - ratio=None       → 默认绿色（启动态）
+        - ratio=0..1       → 外圈进度弧 + 内圆填充色相由绿(120°)渐变到红(0°)，反映当前提醒周期的剩余进度
+        - paused=True      → 蓝灰色，表示锁屏暂停（不画进度弧）
+        - work_ratio=0..1  → 单根指针角度，表示今日累计工作时长占满圈(WORK_CYCLE_SECONDS)的比例
+        """
         pixmap = QPixmap(32, 32)
         pixmap.fill(Qt.transparent)
-        
+
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        
-        painter.setPen(QPen(Qt.darkGreen, 2))
-        painter.setBrush(Qt.green)
+
+        if paused:
+            main_color = QColor(120, 144, 156)      # 蓝灰：暂停
+            hand_color = QColor(84, 110, 122)
+        elif ratio is None:
+            main_color = QColor(76, 175, 80)         # 默认绿
+            hand_color = QColor(27, 94, 32)
+        else:
+            t = max(0.0, min(1.0, ratio))
+            hue = int(120 * (1 - t))                 # 120°(绿) → 0°(红)
+            main_color = QColor.fromHsv(hue, 200, 255)
+            hand_color = main_color.darker(140)
+
+        # 外圈底轨道（浅黑），进度弧会覆盖其"已用"部分，未用部分保留浅黑
+        painter.setPen(QPen(QColor(0, 0, 0, 100), 2))
+        painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(2, 2, 28, 28)
-        
-        painter.setPen(QPen(Qt.darkGreen, 1))
+
+        # 内圆：径向渐变填充（中心提亮、边缘主色），柔和不僵硬
+        grad = QRadialGradient(12, 12, 14)
+        grad.setColorAt(0, main_color.lighter(165))
+        grad.setColorAt(1, main_color)
+        painter.setPen(QPen(main_color.darker(120), 1))
+        painter.setBrush(QBrush(grad))
+        painter.drawEllipse(3, 3, 26, 26)
+
+        # 外圈进度弧：当前提醒周期已用进度（从12点顺时针），与内圆颜色呼应
+        if ratio is not None and not paused:
+            t = max(0.0, min(1.0, ratio))
+            span = int(t * 360 * 16)
+            painter.setPen(QPen(main_color, 3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawArc(2, 2, 28, 28, 90 * 16, span)
+
+        # 12 刻度（钟面参考）
+        painter.setPen(QPen(hand_color, 1))
         for i in range(12):
             angle = i * 30 * 3.14159 / 180
             x1 = 16 + 10 * math.cos(angle)
@@ -841,16 +962,50 @@ class MainWindow(QWidget):
             x2 = 16 + 12 * math.cos(angle)
             y2 = 16 + 12 * math.sin(angle)
             painter.drawLine(int(x1), int(y1), int(x2), int(y2))
-        
-        painter.setPen(QPen(Qt.darkGreen, 2))
-        painter.drawLine(16, 16, 16, 8)
-        
-        painter.setPen(QPen(Qt.darkGreen, 1.5))
-        painter.drawLine(16, 16, 22, 16)
-        
+
+        # 指针：今日累计工作时长（从12点顺时针旋转，满圈 = WORK_CYCLE_SECONDS）
+        if work_ratio is not None:
+            ang = max(0.0, min(1.0, work_ratio)) * 2 * math.pi
+            sx = 16 + 12 * math.sin(ang)
+            sy = 16 - 12 * math.cos(ang)
+            bx = 16 - 4 * math.sin(ang)
+            by = 16 + 4 * math.cos(ang)
+            painter.setPen(QPen(hand_color, 2))
+            painter.drawLine(int(bx), int(by), int(sx), int(sy))
+            # 中心轴点
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(hand_color)
+            painter.drawEllipse(14, 14, 4, 4)
+
         painter.end()
-        
+
         return QIcon(pixmap)
+
+    def _update_tray_color(self):
+        """根据倒计时进度与今日累计工作时长更新托盘图标（带缓存，仅在状态变化时才重绘）。"""
+        work_ratio = min(1.0, self._daily_work_seconds / WORK_CYCLE_SECONDS)
+
+        if self._screen_locked:
+            if self._last_tray_state != 'paused':
+                self.tray_icon.setIcon(self.create_clock_icon(paused=True, work_ratio=work_ratio))
+                self._last_tray_state = 'paused'
+            return
+
+        interval = self.config['remind_interval_minutes'] * 60
+        if interval <= 0:
+            ratio = 0.0
+        else:
+            elapsed = time.time() - self.state_start_time
+            ratio = max(0.0, min(1.0, elapsed / interval))
+
+        # 按整百分比缓存，避免每秒重复重绘近似相同的图标
+        # 状态键同时含倒计时档位与累计工作时长档位
+        pct = int(ratio * 100)
+        wpct = int(work_ratio * 100)
+        key = f"{pct}:{wpct}"
+        if self._last_tray_state != key:
+            self.tray_icon.setIcon(self.create_clock_icon(ratio=ratio, work_ratio=work_ratio))
+            self._last_tray_state = key
     
     def init_tray(self):
         # 如果已有托盘图标，只更新菜单文本，不重建
@@ -981,9 +1136,13 @@ class MainWindow(QWidget):
     def _on_unlock_reset(self):
         """主线程：解锁后重置计时器。"""
         self.state_start_time = time.time()
-        self.current_state = "working"
         debug_timer("解锁后计时器重置")
         self.ensure_background_signal.emit()
+        # 若锁屏期间跨过下班时间，解锁后立即补弹下班提醒
+        if self._off_work_pending:
+            self._off_work_pending = False
+            debug_timer("解锁后补弹下班提醒")
+            self.show_off_work_signal.emit()
     
     def _ensure_background(self):
         """确保程序后台常驻。"""
@@ -1031,6 +1190,7 @@ class MainWindow(QWidget):
             self._current_date = today
             self._daily_work_seconds = 0.0
             self._off_work_notified = False
+            self._off_work_pending = False
         
         # 累积今日工作时间（仅未锁屏时）
         if not self._screen_locked:
@@ -1039,19 +1199,7 @@ class MainWindow(QWidget):
                 self._daily_work_seconds += delta
         self._last_tick_time = now
         
-        # 锁屏时显示暂停状态
-        if self._screen_locked:
-            return
-        
-        # 更新工作倒计时显示
-        elapsed = now - self.state_start_time
-        remaining = max(0, self.config['remind_interval_minutes'] * 60 - elapsed)
-        self.status_label.setText(f"{t('working')} - {t('remaining')} {format_time(remaining)}")
-
-        # 更新今日使用时长
-        self.elapsed_label.setText(f"{t('today_usage')}: {format_time(self._daily_work_seconds)}")
-        
-        # 检查是否到达下班时间
+        # 检查是否到达下班时间（与锁屏状态解耦，确保锁屏跨点时也能正确触发）
         if not self._off_work_notified:
             off_work_str = self.config.get('off_work_time', '17:30')
             try:
@@ -1060,13 +1208,33 @@ class MainWindow(QWidget):
                 off_work_m = int(m)
                 current_h = now_dt.hour
                 current_m = now_dt.minute
-                
+
                 if current_h > off_work_h or (current_h == off_work_h and current_m >= off_work_m):
                     self._off_work_notified = True
-                    debug_timer("到达下班时间，弹窗")
-                    self.show_off_work_signal.emit()
+                    debug_timer("到达下班时间")
+                    if self._screen_locked:
+                        # 锁屏时屏幕不可见，标记待解锁后补弹
+                        self._off_work_pending = True
+                        debug_timer("当前锁屏，解锁后补弹下班提醒")
+                    else:
+                        self.show_off_work_signal.emit()
             except Exception:
                 pass
+
+        # 更新托盘图标颜色（随倒计时由绿渐变红；锁屏显示暂停色）
+        self._update_tray_color()
+
+        # 锁屏时显示暂停状态，不更新倒计时/时长
+        if self._screen_locked:
+            return
+
+        # 更新工作倒计时显示
+        elapsed = now - self.state_start_time
+        remaining = max(0, self.config['remind_interval_minutes'] * 60 - elapsed)
+        self.status_label.setText(f"{t('working')} - {t('remaining')} {format_time(remaining)}")
+
+        # 更新今日使用时长
+        self.elapsed_label.setText(f"{t('today_usage')}: {format_time(self._daily_work_seconds)}")
     
     def close_app(self):
         self.running = False
